@@ -37,7 +37,9 @@ jobs:
       - name: Compile backend sources
         run: python -m compileall -q services/api/app services/worker
       - name: Run backend tests
-        run: pytest services/api/tests -q
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -m pytest services/api/tests -q
       - name: Run isolated PostgreSQL integration
         run: |
           docker pull postgres:16.15-alpine
