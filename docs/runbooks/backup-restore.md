@@ -62,7 +62,15 @@ script and dry-run output before applying it:
 
 Only the script's documented backup archive and metadata patterns are
 eligible. Confirm required recovery points and independent checksum records
-before applying cleanup. The disposable fixture suite is
+before applying cleanup. By default, retention keeps the newest archive for
+each of the seven most recent UTC dates and four most recent Monday-start UTC
+weeks; date and week groups are ordered newest first, and equal timestamps are
+resolved by descending archive name. Malformed or mismatched metadata stops
+pruning. Apply removes each candidate archive and sidecar in separate file
+operations; interruption can leave an orphan sidecar. Do not remove orphan
+sidecars automatically—inspect the backup directory and recover metadata from
+an independent copy where available.
+The disposable fixture suite is
 `scripts\Test-MiniCloudBackupRetention.ps1`; it does not validate any
 operator's actual archives.
 

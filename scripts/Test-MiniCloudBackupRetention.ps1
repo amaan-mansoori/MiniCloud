@@ -92,7 +92,7 @@ try {
         throw "Unable to copy the synthetic PostgreSQL archive fixture."
     }
 
-    $baseDate = [DateTime]::UtcNow.Date
+    $baseDate = [DateTime]::UtcNow.Date.AddDays(-1)
     for ($day = 0; $day -lt 42; $day++) {
         $archivePath = Join-Path $fixture ("minicloud-fixture-{0:D2}.dump" -f $day)
         Copy-Item -LiteralPath $validArchive -Destination $archivePath
@@ -107,9 +107,85 @@ try {
             schema_revision = "synthetic-fixture"
         }
         $metadata | ConvertTo-Json | Set-Content -LiteralPath "$archivePath.metadata.json" -Encoding utf8
-        [System.IO.File]::SetLastWriteTimeUtc($archivePath, $baseDate.AddDays(-$day).AddHours(10))
+        $expectedTimestamp = $baseDate.AddDays(-$day).AddHours(10)
+        [System.IO.File]::SetLastWriteTimeUtc($archivePath, $expectedTimestamp)
+        if ((Get-Item -LiteralPath $archivePath).LastWriteTimeUtc -ne $expectedTimestamp) {
+            throw "Unable to set the expected UTC timestamp for '$($archive.Name)'."
+        }
     }
+
+    $tiedArchivePath = Join-Path $fixture "minicloud-fixture-tied.dump"
+    Copy-Item -LiteralPath $validArchive -Destination $tiedArchivePath
+    $tiedArchive = Get-Item -LiteralPath $tiedArchivePath
+    $tiedArchiveTimestamp = (Get-Item -LiteralPath (Join-Path $fixture "minicloud-fixture-01.dump")).LastWriteTimeUtc
+    [System.IO.File]::SetLastWriteTimeUtc($tiedArchivePath, $tiedArchiveTimestamp)
+    if ((Get-Item -LiteralPath $tiedArchivePath).LastWriteTimeUtc -ne $tiedArchiveTimestamp) {
+        throw "Unable to set the tied UTC timestamp for '$($tiedArchive.Name)'."
+    }
+    $tiedMetadata = [ordered]@{
+        file_name = $tiedArchive.Name
+        size_bytes = $tiedArchive.Length
+        sha256 = (Get-FileHash -LiteralPath $tiedArchivePath -Algorithm SHA256).Hash
+        format = "postgres-custom"
+        archive_integrity_check = "pg_restore --list"
+        schema_revision = "synthetic-fixture"
+    }
+    $tiedMetadata | ConvertTo-Json | Set-Content -LiteralPath "$tiedArchivePath.metadata.json" -Encoding utf8
     Remove-Item -LiteralPath $validArchive -Force
+    $validFixtureFileCount = @(Get-ChildItem -LiteralPath $fixture -File).Count
+
+    $fixtureSnapshot = @(
+        Get-ChildItem -LiteralPath $fixture -File -Recurse |
+            Sort-Object -Property FullName |
+            ForEach-Object {
+                [pscustomobject]@{
+                    FullName = $_.FullName
+                    Length = $_.Length
+                    Sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                    LastWriteTimeUtc = $_.LastWriteTimeUtc
+                }
+            }
+    )
+    $oldestArchivePath = Join-Path $fixture "minicloud-fixture-41.dump"
+    $oldestMetadataPath = "$oldestArchivePath.metadata.json"
+    $oldestMetadataBytes = [System.IO.File]::ReadAllBytes($oldestMetadataPath)
+    $oldestMetadataTimestamp = (Get-Item -LiteralPath $oldestMetadataPath).LastWriteTimeUtc
+    $malformedMetadataRejected = $false
+    try {
+        [System.IO.File]::WriteAllText($oldestMetadataPath, "{ malformed metadata")
+        try {
+            & $retentionScript -BackupDirectory $fixture -Apply | Out-Null
+        } catch {
+            $malformedMetadataRejected = $_.Exception.Message -match "Backup metadata is malformed"
+        }
+    } finally {
+        [System.IO.File]::WriteAllBytes($oldestMetadataPath, $oldestMetadataBytes)
+        [System.IO.File]::SetLastWriteTimeUtc($oldestMetadataPath, $oldestMetadataTimestamp)
+    }
+    $fixtureAfterMalformedMetadata = @(
+        Get-ChildItem -LiteralPath $fixture -File -Recurse |
+            Sort-Object -Property FullName |
+            ForEach-Object {
+                [pscustomobject]@{
+                    FullName = $_.FullName
+                    Length = $_.Length
+                    Sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                    LastWriteTimeUtc = $_.LastWriteTimeUtc
+                }
+            }
+    )
+    $fixtureChanges = @(
+        Compare-Object `
+            -ReferenceObject $fixtureSnapshot `
+            -DifferenceObject $fixtureAfterMalformedMetadata `
+            -Property FullName,Length,Sha256,LastWriteTimeUtc
+    )
+    if (
+        -not $malformedMetadataRejected -or
+        $fixtureChanges.Count -ne 0
+    ) {
+        throw "Malformed metadata was not rejected without changing the retention fixture."
+    }
 
     $corruptArchive = Join-Path $fixture "minicloud-corrupt.dump"
     [System.IO.File]::WriteAllText($corruptArchive, "incomplete archive fixture")
@@ -156,7 +232,7 @@ try {
     if (-not $rejectedCorruptArchive) {
         throw "Retention did not reject a checksum-matching incomplete PostgreSQL archive."
     }
-    if (@(Get-ChildItem -LiteralPath $fixture -File).Count -ne 86) {
+    if (@(Get-ChildItem -LiteralPath $fixture -File).Count -ne ($validFixtureFileCount + 2)) {
         throw "Corrupt-archive rejection modified or lost fixture files."
     }
     Remove-Item -LiteralPath $corruptArchive,"$corruptArchive.metadata.json" -Force
@@ -165,7 +241,7 @@ try {
     if ($dryRun[0] -notmatch "^mode=DRY-RUN") {
         throw "Retention did not report a successful dry run."
     }
-    if (@(Get-ChildItem -LiteralPath $fixture -File).Count -ne 84) {
+    if (@(Get-ChildItem -LiteralPath $fixture -File).Count -ne $validFixtureFileCount) {
         throw "Retention dry run changed the fixture."
     }
 
@@ -178,11 +254,49 @@ try {
     if ($archives.Count -lt 9 -or $archives.Count -gt 10 -or $metadata.Count -ne $archives.Count) {
         throw "Retention did not preserve the expected daily and weekly archive/metadata set."
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $fixture "minicloud-fixture-00.dump.metadata.json"))) {
-        throw "Retention removed metadata for the newest backup."
+    if (
+        -not (Test-Path -LiteralPath (Join-Path $fixture "minicloud-fixture-00.dump")) -or
+        -not (Test-Path -LiteralPath (Join-Path $fixture "minicloud-fixture-00.dump.metadata.json"))
+    ) {
+        throw "Retention removed the newest backup or its metadata."
     }
-    if (Test-Path -LiteralPath (Join-Path $fixture "minicloud-fixture-41.dump.metadata.json")) {
-        throw "Retention did not remove old archive metadata with its archive."
+    if (
+        (Test-Path -LiteralPath $oldestArchivePath) -or
+        (Test-Path -LiteralPath $oldestMetadataPath)
+    ) {
+        throw "Retention did not remove the old archive and its metadata together."
+    }
+    $tiedOriginalPath = Join-Path $fixture "minicloud-fixture-01.dump"
+    if (
+        (Test-Path -LiteralPath $tiedOriginalPath) -or
+        (Test-Path -LiteralPath "$tiedOriginalPath.metadata.json") -or
+        -not (Test-Path -LiteralPath $tiedArchivePath) -or
+        -not (Test-Path -LiteralPath "$tiedArchivePath.metadata.json")
+    ) {
+        throw "Retention did not resolve tied timestamps deterministically by descending file name."
+    }
+    foreach ($archive in $archives) {
+        $metadataPath = "$($archive.FullName).metadata.json"
+        if (-not (Test-Path -LiteralPath $metadataPath)) {
+            throw "Retention left an archive without metadata: '$($archive.Name)'."
+        }
+        $archiveMetadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+        if (
+            $archiveMetadata.file_name -ne $archive.Name -or
+            [long]$archiveMetadata.size_bytes -ne $archive.Length -or
+            $archiveMetadata.sha256 -ne (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash
+        ) {
+            throw "Retention left inconsistent metadata for '$($archive.Name)'."
+        }
+    }
+    foreach ($metadataFile in $metadata) {
+        $archivePath = $metadataFile.FullName.Substring(
+            0,
+            $metadataFile.FullName.Length - ".metadata.json".Length
+        )
+        if (-not (Test-Path -LiteralPath $archivePath)) {
+            throw "Retention left metadata without its archive: '$($metadataFile.Name)'."
+        }
     }
 
     $retentionPathRejected = $false
@@ -205,7 +319,7 @@ try {
         throw "The backup script accepted the repository as its target."
     }
 
-    Write-Output "Backup retention fixture tests passed: corrupt archive rejected; $($archives.Count) valid archives and metadata sidecars retained."
+    Write-Output "Backup retention fixture tests passed: malformed metadata and corrupt archives rejected; newest and tied-timestamp selection preserved; $($archives.Count) valid archive/metadata pairs retained."
 } finally {
     if ($containerCreated) {
         & docker rm -f $containerName *> $null

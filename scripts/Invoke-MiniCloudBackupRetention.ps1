@@ -11,6 +11,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Import-Module -Name (Join-Path $PSScriptRoot "MiniCloudBackupRetention.psm1") -Force
 
 $resolvedDirectory = (Resolve-Path -LiteralPath $BackupDirectory).Path
 $directory = Get-Item -LiteralPath $resolvedDirectory
@@ -90,26 +91,14 @@ if ($backups.Count -gt 0) {
 $retainedPaths = [System.Collections.Generic.HashSet[string]]::new(
     [System.StringComparer]::OrdinalIgnoreCase
 )
-$dailyGroups = @(
-    $verifiedBackups |
-        Group-Object { $_.LastWriteTimeUtc.ToString("yyyy-MM-dd") } |
-        Select-Object -First $KeepDaily
+$selectedBackups = @(
+    Get-MiniCloudBackupRetentionSelection `
+        -Backups $verifiedBackups.ToArray() `
+        -KeepDaily $KeepDaily `
+        -KeepWeekly $KeepWeekly
 )
-foreach ($group in $dailyGroups) {
-    [void]$retainedPaths.Add($group.Group[0].FullName)
-}
-
-$weeklyGroups = @(
-    $verifiedBackups |
-        Group-Object {
-            $date = $_.LastWriteTimeUtc.Date
-            $mondayOffset = (([int]$date.DayOfWeek + 6) % 7)
-            $date.AddDays(-$mondayOffset).ToString("yyyy-MM-dd")
-        } |
-        Select-Object -First $KeepWeekly
-)
-foreach ($group in $weeklyGroups) {
-    [void]$retainedPaths.Add($group.Group[0].FullName)
+foreach ($backup in $selectedBackups) {
+    [void]$retainedPaths.Add($backup.FullName)
 }
 foreach ($backup in $legacyBackups) {
     [void]$retainedPaths.Add($backup.FullName)
