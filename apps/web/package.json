@@ -1,0 +1,35 @@
+{
+  "name": "minicloud-web",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit --incremental false",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "next": "16.4.3",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.0",
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/node": "22.15.2",
+    "@types/react": "19.0.2",
+    "@types/react-dom": "19.0.2",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.4.3",
+    "postcss": "8.5.30",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.8.3"
+  },
+  "overrides": {
+    "postcss": "$postcss",
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "^11.0.8"
+    }
+  }
+}

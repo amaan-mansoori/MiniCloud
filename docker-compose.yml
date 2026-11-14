@@ -1,0 +1,138 @@
+﻿services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: minicloud-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: minicloud
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    profiles:
+      - migration
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      SERVICE_ROLE: migrate
+      DATABASE_URL: ${MINICLOUD_API_DATABASE_URL:-}
+      MIGRATION_DATABASE_URL: ${MINICLOUD_MIGRATION_DATABASE_URL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-lc", "cd /workspace/services/api && alembic upgrade head"]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      SERVICE_ROLE: api
+      DATABASE_URL: ${MINICLOUD_API_DATABASE_URL:-}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 60
+      CORS_ORIGINS: http://localhost:3001
+      LOG_LEVEL: INFO
+      KUBERNETES_IN_CLUSTER: false
+      AUTH_RATE_LIMIT_MAX_REQUESTS: ${AUTH_RATE_LIMIT_MAX_REQUESTS:-5}
+      AUTH_RATE_LIMIT_WINDOW_SECONDS: ${AUTH_RATE_LIMIT_WINDOW_SECONDS:-60}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=4).read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    ports:
+      - "127.0.0.1:8001:8000"
+    command: ["sh", "-lc", "cd /workspace/services/api && if [ \"$${APP_ENV}\" = development ]; then exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload; else exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000; fi"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/worker.Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      SERVICE_ROLE: worker
+      DATABASE_URL: ${MINICLOUD_WORKER_DATABASE_URL:-}
+      KUBERNETES_IN_CLUSTER: false
+      KUBERNETES_CONFIG_FILE: /run/minicloud/credentials/kubeconfig
+      KUBERNETES_CONTEXT: minicloud-worker
+      KUBERNETES_NAMESPACE: ${KUBERNETES_NAMESPACE:-minicloud}
+      KUBERNETES_ROLLOUT_TIMEOUT_SECONDS: ${KUBERNETES_ROLLOUT_TIMEOUT_SECONDS:-600}
+      WORKER_INTERVAL_SECONDS: 10
+      WORKER_AUTH_STATUS_FILE: /tmp/minicloud-worker-auth-blocked
+      WORKER_DATABASE_STATUS_FILE: /tmp/minicloud-worker-db-blocked
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ${MINICLOUD_WORKER_CREDENTIAL_DIR:-./.local/worker-credentials}
+        target: /run/minicloud/credentials
+        read_only: true
+    networks:
+      - default
+      - kind
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import pathlib,sys; sys.exit(0 if any(b'services/worker/main.py' in process.read_bytes().split(b'\\0') for process in pathlib.Path('/proc').glob('[0-9]*/cmdline')) and not pathlib.Path('/tmp/minicloud-worker-auth-blocked').exists() and not pathlib.Path('/tmp/minicloud-worker-db-blocked').exists() else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    command: ["python", "services/worker/main.py"]
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8001}
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8001
+      APP_ENV: ${APP_ENV:-production}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:3000"
+    command: ["sh", "-lc", "if [ \"$${APP_ENV}\" = development ]; then exec npm run dev -- --hostname 0.0.0.0 --port 3000; else exec npm run start -- --hostname 0.0.0.0 --port 3000; fi"]
+
+volumes:
+  pgdata:
+
+networks:
+  kind:
+    name: ${KIND_DOCKER_NETWORK:-kind}
+    external: true

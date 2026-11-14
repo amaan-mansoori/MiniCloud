@@ -1,0 +1,88 @@
+name: MiniCloud CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  worker-credential-fixtures:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test isolated worker credential renewal fixtures
+        shell: pwsh
+        run: ./scripts/Test-MiniCloudWorkerCredentialRenewal.ps1
+
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r services/api/requirements.txt
+          pip install ruff==0.16.7
+          pip install pip-audit==2.10.1
+      - name: Lint Python sources
+        run: ruff check services/api/app services/api/tests services/api/integration_tests services/worker packages/minicloud_cli
+      - name: Audit backend dependencies
+        run: pip-audit --strict -r services/api/requirements.txt
+      - name: Compile backend sources
+        run: python -m compileall -q services/api/app services/worker
+      - name: Run backend tests
+        run: pytest services/api/tests -q
+      - name: Run isolated PostgreSQL integration
+        run: |
+          docker pull postgres:16.15-alpine
+          pwsh -NoProfile -File scripts/Test-MiniCloudPostgresIntegration.ps1
+      - name: Test backup retention on isolated PostgreSQL archive fixtures
+        run: pwsh -NoProfile -File scripts/Test-MiniCloudBackupRetention.ps1
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+      - name: Build application images
+        run: docker compose build api worker web
+
+  frontend-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Pin npm
+        run: npm install --global npm@11.6.2 --no-audit --no-fund
+      - name: Install dependencies
+        run: |
+          cd apps/web
+          npm ci
+      - name: Lint frontend
+        run: |
+          cd apps/web
+          npm run lint
+      - name: Type-check frontend
+        run: |
+          cd apps/web
+          npm run typecheck
+      - name: Install Playwright Chromium
+        run: |
+          cd apps/web
+          npx playwright install --with-deps chromium
+      - name: Run frontend policy and scaling browser test
+        run: |
+          cd apps/web
+          npm run test:e2e
+      - name: Build frontend
+        run: |
+          cd apps/web
+          npm run build
+      - name: Audit all frontend dependencies
+        run: |
+          cd apps/web
+          npm audit --audit-level=moderate

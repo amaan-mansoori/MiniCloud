@@ -1,0 +1,1 @@
+"""MiniCloud command-line client."""

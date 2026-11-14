@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minicloud
+  labels:
+    app.kubernetes.io/managed-by: minicloud
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: minicloud-worker
+  namespace: minicloud
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: minicloud-worker
+  namespace: minicloud
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: minicloud-worker
+  namespace: minicloud
+subjects:
+  - kind: ServiceAccount
+    name: minicloud-worker
+    namespace: minicloud
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: minicloud-worker
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: minicloud-api-diagnostics
+  namespace: minicloud
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: minicloud-api-diagnostics
+  namespace: minicloud
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: minicloud-api-diagnostics
+  namespace: minicloud
+subjects:
+  - kind: ServiceAccount
+    name: minicloud-api-diagnostics
+    namespace: minicloud
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: minicloud-api-diagnostics

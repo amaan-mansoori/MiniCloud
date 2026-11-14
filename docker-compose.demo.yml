@@ -1,0 +1,112 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: minicloud
+      POSTGRES_USER: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    tmpfs:
+      - /var/lib/postgresql/data:rw,noexec,nosuid,size=512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d minicloud"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks:
+      - demo
+
+  migrate:
+    profiles:
+      - migration
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    environment:
+      APP_ENV: development
+      SERVICE_ROLE: migrate
+      DATABASE_URL: postgresql+psycopg://postgres@postgres/minicloud
+      MIGRATION_DATABASE_URL: postgresql+psycopg://postgres@postgres/minicloud
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /workspace/services/api
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    networks:
+      - demo
+
+  api:
+    image: minicloud-resume-api:local
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${MINICLOUD_SOURCE_REVISION:-unknown}
+        org.opencontainers.image.created: ${MINICLOUD_BUILD_DATE:-unknown}
+        com.minicloud.source-tree-sha256: ${MINICLOUD_SOURCE_TREE_SHA256:-unknown}
+    environment:
+      APP_ENV: development
+      SERVICE_ROLE: api
+      DATABASE_URL: postgresql+psycopg://postgres@postgres/minicloud
+      JWT_SECRET_KEY: ${MINICLOUD_DEMO_JWT_SECRET:?Set a unique disposable MINICLOUD_DEMO_JWT_SECRET}
+      CORS_ORIGINS: http://127.0.0.1:13018
+      LOG_LEVEL: INFO
+      KUBERNETES_IN_CLUSTER: "false"
+      AUTH_RATE_LIMIT_MAX_REQUESTS: 100
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=4).read()"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - demo
+
+  web:
+    image: minicloud-resume-web:local
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${MINICLOUD_SOURCE_REVISION:-unknown}
+        org.opencontainers.image.created: ${MINICLOUD_BUILD_DATE:-unknown}
+        com.minicloud.source-tree-sha256: ${MINICLOUD_SOURCE_TREE_SHA256:-unknown}
+      args:
+        NEXT_PUBLIC_API_URL: http://127.0.0.1:18017
+    environment:
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:18017
+      APP_ENV: development
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - demo
+
+  gateway:
+    image: nginx:alpine
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18017:18017"
+      - "127.0.0.1:13018:13018"
+    volumes:
+      - ./infra/docker/demo-gateway.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - demo
+      - ingress
+
+networks:
+  demo:
+    internal: true
+  ingress: {}

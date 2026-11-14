@@ -1,0 +1,12 @@
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["B", "E4", "E7", "E9", "F", "I", "ISC", "SIM", "UP"]
+
+[lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends"]
+
+[lint.per-file-ignores]
+# The Worker adds its API source root to sys.path before importing the API package.
+"services/worker/main.py" = ["E402"]
